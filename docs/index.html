@@ -1,0 +1,455 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>MEMORA — Context-Aware Memory Engine</title>
+  <meta name="description" content="Next-generation visualizer and benchmark suite for context-aware graph memory eviction." />
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&family=Outfit:wght@400;500;600;700;800&family=Plus+Jakarta+Sans:wght@400;500;600;700&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body class="cyber-theme">
+  <!-- Ambient background lighting orbs -->
+  <div class="ambient-glow glow-1"></div>
+  <div class="ambient-glow glow-2"></div>
+  <div class="ambient-glow glow-3"></div>
+  <div class="grid-overlay"></div>
+
+  <div class="app-shell">
+    <!-- ───────────────── Master Header ───────────────── -->
+    <header class="master-header">
+      <div class="brand-section">
+        <div class="brand-badge">
+          <div class="core-orb"></div>
+          <span class="brand-icon">⚡</span>
+        </div>
+        <div class="brand-text">
+          <div class="brand-title-row">
+            <span class="brand-name">MEMORA</span>
+            <span class="brand-version">v2.4-CAFA</span>
+          </div>
+          <span class="brand-sub">CONTEXT-AWARE EVICTION ENGINE</span>
+        </div>
+      </div>
+
+      <nav class="nav-control">
+        <button class="nav-tab active" data-tab="playground" id="tab-playground">
+          <span class="tab-icon">◈</span>
+          <span class="tab-label">GRAPH COCKPIT</span>
+        </button>
+        <button class="nav-tab" data-tab="compare" id="tab-compare">
+          <span class="tab-icon">☵</span>
+          <span class="tab-label">POLICY BENCHMARK</span>
+        </button>
+        <button class="nav-tab" data-tab="stepper" id="tab-stepper">
+          <span class="tab-icon">◷</span>
+          <span class="tab-label">STEP EVICTION</span>
+        </button>
+      </nav>
+
+      <div class="header-status">
+        <div class="status-pulse-dot" id="system-status-dot"></div>
+        <span class="status-text" id="system-status-text">SYSTEM ONLINE</span>
+      </div>
+    </header>
+
+    <!-- ───────────────── View 1: Graph Cockpit ───────────────── -->
+    <main class="page-view active" id="page-playground">
+      <div class="cockpit-grid">
+        <!-- Left Controller Sidebar -->
+        <aside class="hud-sidebar glass-panel">
+          <div class="panel-header">
+            <span class="panel-tag">SYS//CONFIG</span>
+            <h3>GRAPH PARAMETERS</h3>
+          </div>
+
+          <div class="control-list">
+            <div class="hud-control">
+              <div class="control-label-row">
+                <span class="control-label">MEMORIES (NODES)</span>
+                <span class="hud-badge" id="val-n">150</span>
+              </div>
+              <div class="slider-wrapper">
+                <input type="range" id="inp-n" min="20" max="400" value="150" step="10" />
+                <div class="slider-track-glow"></div>
+              </div>
+            </div>
+
+            <div class="hud-control">
+              <div class="control-label-row">
+                <span class="control-label">SEMANTIC CLUSTERS</span>
+                <span class="hud-badge" id="val-categories">8</span>
+              </div>
+              <div class="slider-wrapper">
+                <input type="range" id="inp-categories" min="2" max="15" value="8" step="1" />
+                <div class="slider-track-glow"></div>
+              </div>
+            </div>
+
+            <div class="hud-control">
+              <div class="control-label-row">
+                <span class="control-label">AVERAGE DEGREE</span>
+                <span class="hud-badge" id="val-degree">4.0</span>
+              </div>
+              <div class="slider-wrapper">
+                <input type="range" id="inp-degree" min="2" max="10" value="4" step="1" />
+                <div class="slider-track-glow"></div>
+              </div>
+            </div>
+
+            <div class="hud-control">
+              <div class="control-label-row">
+                <span class="control-label">BRIDGE FRACTION</span>
+                <span class="hud-badge accent" id="val-bridges">5%</span>
+              </div>
+              <div class="slider-wrapper">
+                <input type="range" id="inp-bridges" min="0" max="0.20" value="0.05" step="0.01" />
+                <div class="slider-track-glow"></div>
+              </div>
+            </div>
+
+            <div class="hud-control">
+              <div class="control-label-row">
+                <span class="control-label">SEED</span>
+              </div>
+              <div class="seed-input-row">
+                <input type="number" id="inp-seed" value="42" min="0" max="9999" class="hud-number-input" />
+                <button id="btn-random-seed" class="hud-btn-icon" title="Randomize seed">
+                  <span>🎲</span>
+                </button>
+              </div>
+            </div>
+          </div>
+
+          <button class="neon-action-btn" id="btn-generate">
+            <span class="btn-glow"></span>
+            <span class="btn-text">⚡ GENERATE MEMORY GRAPH</span>
+          </button>
+
+          <!-- Telemetry readouts -->
+          <div class="telemetry-box" id="telemetry-box">
+            <div class="telemetry-title">GRAPH TELEMETRY</div>
+            <div class="telemetry-grid">
+              <div class="telemetry-card">
+                <span class="t-label">NODES</span>
+                <span class="t-val" id="stat-n">—</span>
+              </div>
+              <div class="telemetry-card">
+                <span class="t-label">EDGES</span>
+                <span class="t-val" id="stat-edges">—</span>
+              </div>
+              <div class="telemetry-card">
+                <span class="t-label">AVG DEG</span>
+                <span class="t-val" id="stat-degree">—</span>
+              </div>
+              <div class="telemetry-card">
+                <span class="t-label">SIZE</span>
+                <span class="t-val" id="stat-size">—</span>
+              </div>
+              <div class="telemetry-card highlight">
+                <span class="t-label">BRIDGES</span>
+                <span class="t-val" id="stat-bridges">—</span>
+              </div>
+              <div class="telemetry-card">
+                <span class="t-label">CLUSTERS</span>
+                <span class="t-val" id="stat-cats">—</span>
+              </div>
+            </div>
+          </div>
+        </aside>
+
+        <!-- Center Graph Visualizer Canvas Area -->
+        <section class="canvas-viewport glass-panel" id="viewport-playground">
+          <div class="viewport-hud-header">
+            <div class="hud-badges">
+              <span class="hud-pill"><span class="dot-green"></span> REALTIME SIM</span>
+              <span class="hud-pill mono" id="hud-node-count">V: 0 | E: 0</span>
+            </div>
+            <!-- Canvas Floating Controls -->
+            <div class="canvas-floating-controls">
+              <button class="tool-btn" id="btn-zoom-in" title="Zoom In">+</button>
+              <button class="tool-btn" id="btn-zoom-out" title="Zoom Out">−</button>
+              <button class="tool-btn" id="btn-reset-view" title="Reset View">⊙</button>
+              <button class="tool-btn active" id="btn-toggle-labels" title="Toggle Labels">TXT</button>
+            </div>
+          </div>
+
+          <!-- Empty placeholder state -->
+          <div class="viewport-empty" id="graph-placeholder">
+            <div class="radar-scan">
+              <div class="radar-line"></div>
+            </div>
+            <div class="empty-message">
+              <h4>NEURAL MEMORY GRAPH OFFLINE</h4>
+              <p>Configure parameters on the left and click <strong>GENERATE MEMORY GRAPH</strong></p>
+            </div>
+          </div>
+
+          <!-- Interactive Canvas -->
+          <canvas id="graph-canvas" class="render-canvas"></canvas>
+
+          <!-- Graph Legend -->
+          <div class="canvas-hud-legend" id="graph-legend">
+            <div class="hud-legend-item"><span class="halo-dot bridge"></span> BRIDGE NODE</div>
+            <div class="hud-legend-item"><span class="halo-dot cut"></span> ARTICULATION POINT</div>
+            <div class="hud-legend-item"><span class="halo-dot normal"></span> REGULAR MEMORY</div>
+            <div class="hud-legend-item"><span class="halo-dot evicted"></span> EVICTED</div>
+          </div>
+
+          <!-- Slide-out Node Inspector HUD -->
+          <div class="node-inspector-hud" id="node-inspector" style="display:none;">
+            <div class="inspector-header">
+              <div class="inspector-badge" id="insp-cat-badge">CATEGORY 0</div>
+              <button class="inspector-close" id="btn-close-inspector">✕</button>
+            </div>
+            <h4 class="inspector-title" id="insp-name">Memory Name</h4>
+            <div class="inspector-meta-row">
+              <span class="inspector-chip" id="insp-type">NORMAL</span>
+              <span class="inspector-chip mono" id="insp-size">0.0 MB</span>
+            </div>
+            <div class="inspector-bars">
+              <div class="bar-group">
+                <div class="bar-label"><span>OBSERVED IMPORTANCE</span><span class="mono" id="insp-imp">0.0</span></div>
+                <div class="bar-track"><div class="bar-fill cyan" id="insp-imp-bar" style="width: 0%"></div></div>
+              </div>
+              <div class="bar-group">
+                <div class="bar-label"><span>PAIR DAMAGE D(v)</span><span class="mono" id="insp-damage">0</span></div>
+                <div class="bar-track"><div class="bar-fill rose" id="insp-damage-bar" style="width: 0%"></div></div>
+              </div>
+            </div>
+            <div class="inspector-details">
+              <div class="det-item"><span class="det-k">Accesses:</span><span class="det-v mono" id="insp-access">0</span></div>
+              <div class="det-item"><span class="det-k">Age:</span><span class="det-v mono" id="insp-age">0d</span></div>
+              <div class="det-item"><span class="det-k">Degree:</span><span class="det-v mono" id="insp-degree">0</span></div>
+            </div>
+          </div>
+
+          <div class="hud-tooltip" id="graph-tooltip"></div>
+        </section>
+      </div>
+    </main>
+
+    <!-- ───────────────── View 2: Policy Benchmark ───────────────── -->
+    <main class="page-view" id="page-compare">
+      <div class="benchmark-layout">
+        <!-- Control Header Bar -->
+        <div class="benchmark-toolbar glass-panel">
+          <div class="toolbar-left">
+            <div class="budget-control">
+              <span class="tb-label">EVICTION BUDGET</span>
+              <div class="budget-slider-row">
+                <input type="range" id="inp-budget" min="5" max="50" value="25" step="5" />
+                <span class="hud-badge neon-cyan" id="val-budget">25%</span>
+              </div>
+            </div>
+
+            <div class="policies-selector" id="policy-checkboxes">
+              <!-- Checkboxes dynamically generated with glow badges -->
+            </div>
+          </div>
+
+          <button class="neon-action-btn compact" id="btn-run-compare">
+            <span class="btn-glow"></span>
+            <span class="btn-text">▶ EXECUTE BENCHMARK</span>
+          </button>
+        </div>
+
+        <!-- Empty state -->
+        <div class="benchmark-empty" id="compare-placeholder">
+          <div class="empty-icon-shield">☵</div>
+          <h4>NO BENCHMARK DATA</h4>
+          <p>Generate a memory graph in the <strong>Graph Cockpit</strong> tab, then execute the benchmark.</p>
+        </div>
+
+        <!-- Benchmark Results Container -->
+        <div class="benchmark-data-view" id="compare-results" style="display:none;">
+          <!-- Top KPI Highlight Cards -->
+          <div class="kpi-cards-row">
+            <div class="kpi-card win-card">
+              <div class="kpi-icon">👑</div>
+              <div class="kpi-info">
+                <span class="kpi-tag">TOP PERFORMING POLICY</span>
+                <span class="kpi-val highlight" id="kpi-top-policy">CAFA-Repair</span>
+                <span class="kpi-desc" id="kpi-top-desc">99.7% pairwise context preservation</span>
+              </div>
+            </div>
+            <div class="kpi-card">
+              <div class="kpi-icon">⚡</div>
+              <div class="kpi-info">
+                <span class="kpi-tag">CAFA VS LRU GAIN</span>
+                <span class="kpi-val" id="kpi-gain">+24.8%</span>
+                <span class="kpi-desc">More reachability retained vs classical cache</span>
+              </div>
+            </div>
+            <div class="kpi-card">
+              <div class="kpi-icon">🛡️</div>
+              <div class="kpi-info">
+                <span class="kpi-tag">BRIDGES PRESERVED</span>
+                <span class="kpi-val" id="kpi-bridges-saved">100%</span>
+                <span class="kpi-desc">Critical connective tissue saved</span>
+              </div>
+            </div>
+          </div>
+
+          <!-- Charts Row -->
+          <div class="charts-duo-grid">
+            <div class="chart-panel glass-panel">
+              <div class="chart-header">
+                <span class="chart-title">PAIRWISE CONTEXT RETENTION</span>
+                <span class="chart-sub mono">Higher is better (0.00 — 1.00)</span>
+              </div>
+              <div class="canvas-chart-wrap">
+                <canvas id="chart-retention" height="280"></canvas>
+              </div>
+            </div>
+
+            <div class="chart-panel glass-panel">
+              <div class="chart-header">
+                <span class="chart-title">RETAINED IMPORTANCE SCORE</span>
+                <span class="chart-sub mono">Higher is better (0.00 — 1.00)</span>
+              </div>
+              <div class="canvas-chart-wrap">
+                <canvas id="chart-importance" height="280"></canvas>
+              </div>
+            </div>
+          </div>
+
+          <!-- Full Benchmark Matrix Table -->
+          <div class="matrix-table-card glass-panel">
+            <div class="matrix-header">
+              <span class="matrix-title">EVICTION PERFORMANCE MATRIX</span>
+              <span class="matrix-count mono" id="matrix-run-stats">10 POLICIES EVALUATED</span>
+            </div>
+            <div class="table-responsive">
+              <table class="hud-table" id="results-table">
+                <thead><tr id="results-thead"></tr></thead>
+                <tbody id="results-tbody"></tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      </div>
+    </main>
+
+    <!-- ───────────────── View 3: Step Eviction ───────────────── -->
+    <main class="page-view" id="page-stepper">
+      <div class="stepper-grid">
+        <!-- Stepper Controller Sidebar -->
+        <aside class="hud-sidebar glass-panel">
+          <div class="panel-header">
+            <span class="panel-tag">CAFA//STEPPER</span>
+            <h3>EVICTION SEQUENCE</h3>
+          </div>
+
+          <div class="hud-control">
+            <div class="control-label-row">
+              <span class="control-label">EVICTION BUDGET</span>
+              <span class="hud-badge neon-cyan" id="val-step-budget">25%</span>
+            </div>
+            <div class="slider-wrapper">
+              <input type="range" id="inp-step-budget" min="5" max="50" value="25" step="5" />
+              <div class="slider-track-glow"></div>
+            </div>
+          </div>
+
+          <!-- Futuristic Radial / Meter Gauge -->
+          <div class="gauge-card">
+            <div class="gauge-header">
+              <span>STORAGE RECLAIMED</span>
+              <span class="mono accent" id="gauge-pct">0.0%</span>
+            </div>
+            <div class="meter-bar-track">
+              <div class="meter-bar-fill" id="step-bar" style="width: 0%"></div>
+            </div>
+            <div class="gauge-sub mono" id="step-text">0.00 / 0.00 MB</div>
+          </div>
+
+          <!-- Media Player Transport Controls -->
+          <div class="stepper-transport-controls">
+            <button class="transport-btn" id="btn-step-init" title="Reset & Reinitialize">
+              <span class="icon">⏮</span>
+              <span class="t-txt">INIT</span>
+            </button>
+            <button class="transport-btn primary" id="btn-step-next" disabled title="Step Forward">
+              <span class="icon">⏭</span>
+              <span class="t-txt">STEP</span>
+            </button>
+            <button class="transport-btn highlight" id="btn-step-auto" disabled title="Auto Play">
+              <span class="icon">▶</span>
+              <span class="t-txt">AUTO</span>
+            </button>
+          </div>
+
+          <div class="speed-toggle-row">
+            <span class="speed-label">SPEED:</span>
+            <button class="speed-pill active" data-speed="400">1x</button>
+            <button class="speed-pill" data-speed="150">2.5x</button>
+            <button class="speed-pill" data-speed="50">5x</button>
+          </div>
+
+          <!-- Realtime Eviction Terminal Feed -->
+          <div class="terminal-log-panel">
+            <div class="terminal-header">
+              <span class="terminal-tag">LIVE EVICTION TELEMETRY</span>
+              <span class="terminal-count mono" id="log-count">0 EVENTS</span>
+            </div>
+            <div class="terminal-feed" id="step-log">
+              <div class="log-entry system">[SYSTEM READY] Click INIT to begin eviction sequence.</div>
+            </div>
+          </div>
+        </aside>
+
+        <!-- Stepper Viewport Canvas -->
+        <section class="canvas-viewport glass-panel" id="viewport-stepper">
+          <div class="viewport-hud-header">
+            <div class="hud-badges">
+              <span class="hud-pill"><span class="dot-amber"></span> CAFA DENSITY STEPPER</span>
+              <span class="hud-pill mono" id="stepper-status-badge">STANDBY</span>
+            </div>
+            <div class="canvas-floating-controls">
+              <button class="tool-btn" id="btn-stepper-zoom-in" title="Zoom In">+</button>
+              <button class="tool-btn" id="btn-stepper-zoom-out" title="Zoom Out">−</button>
+              <button class="tool-btn" id="btn-stepper-reset" title="Reset View">⊙</button>
+            </div>
+          </div>
+
+          <div class="viewport-empty" id="stepper-placeholder">
+            <div class="radar-scan">
+              <div class="radar-line"></div>
+            </div>
+            <div class="empty-message">
+              <h4>STEPPER INITIALIZATION REQUIRED</h4>
+              <p>Generate a graph in the Cockpit first, then click <strong>INIT</strong> to stream real-time node evictions.</p>
+            </div>
+          </div>
+
+          <canvas id="stepper-canvas" class="render-canvas"></canvas>
+
+          <div class="canvas-hud-legend" id="stepper-legend">
+            <div class="hud-legend-item"><span class="halo-dot bridge"></span> BRIDGE</div>
+            <div class="hud-legend-item"><span class="halo-dot cut"></span> ARTICULATION</div>
+            <div class="hud-legend-item"><span class="halo-dot normal"></span> ACTIVE</div>
+            <div class="hud-legend-item"><span class="halo-dot evicted"></span> EVICTED</div>
+            <div class="hud-legend-item"><span class="halo-dot just-evicted"></span> JUST EVICTED</div>
+          </div>
+
+          <div class="hud-tooltip" id="stepper-tooltip"></div>
+        </section>
+      </div>
+    </main>
+  </div>
+
+  <!-- Global Cyber Loading Overlay -->
+  <div class="cyber-loader-overlay" id="loading-overlay" style="display:none;">
+    <div class="loader-core">
+      <div class="loader-spinner"></div>
+      <div class="loader-pulse"></div>
+    </div>
+    <div class="loader-text mono" id="loading-text">PROCESSING GRAPH TOPOLOGY…</div>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>

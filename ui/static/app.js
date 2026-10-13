@@ -1,5 +1,6 @@
 /* ═══════════════════════════════════════════════════════════════
    MEMORA UI — Next-Gen Interactive Graph Engine & Controls
+   Client-Side Engine for GitHub Pages & Local Deployment
    ═══════════════════════════════════════════════════════════════ */
 
 // ──────────────── Palette & Configurations ────────────────
@@ -40,32 +41,766 @@ const ALL_POLICIES = [
   "value_greedy", "degree_cafa", "cafa_static", "cafa_local", "cafa_repair",
 ];
 
-// ──────────────── State ────────────────
+const TOPICS = [
+  "lecture notes", "assignment", "exam paper", "lab report", "meeting notes",
+  "screenshot", "invoice", "photo", "chat log", "bookmark", "email thread",
+  "code snippet", "reference paper", "todo list", "contact card",
+];
+
+// ──────────────── Pure JS Pseudo-Random Number Generator ────────────────
+class PRNG {
+  constructor(seed = 42) {
+    this.s = seed | 0;
+  }
+  next() {
+    let t = (this.s += 0x6d2b79f5);
+    t = Math.imul(t ^ (t >>> 15), t | 1);
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  }
+  uniform(min = 0, max = 1) {
+    return min + (max - min) * this.next();
+  }
+  normal(mean = 0, std = 1) {
+    let u = 0, v = 0;
+    while (u === 0) u = this.next();
+    while (v === 0) v = this.next();
+    return mean + std * Math.sqrt(-2.0 * Math.log(u)) * Math.cos(2.0 * Math.PI * v);
+  }
+  lognormal(mu = 0.9, sigma = 0.9) {
+    return Math.exp(this.normal(mu, sigma));
+  }
+  beta(alpha, beta) {
+    const gamma = (a) => {
+      if (a < 1) return gamma(a + 1) * Math.pow(this.next(), 1 / a);
+      const d = a - 1 / 3;
+      const c = 1 / Math.sqrt(9 * d);
+      while (true) {
+        let z = this.normal();
+        let v = 1 + c * z;
+        if (v <= 0) continue;
+        v = v * v * v;
+        let u = this.next();
+        if (u < 1 - 0.0331 * z * z * z * z) return d * v;
+        if (Math.log(u) < 0.5 * z * z + d * (1 - v + Math.log(v))) return d * v;
+      }
+    };
+    const x = gamma(alpha);
+    const y = gamma(beta);
+    return x / (x + y);
+  }
+  poisson(lambda = 1) {
+    const L = Math.exp(-lambda);
+    let k = 0, p = 1;
+    do {
+      k++;
+      p *= this.next();
+    } while (p > L);
+    return k - 1;
+  }
+}
+
+// ──────────────── Math & Stats Utilities ────────────────
+function rankNormalize(arr) {
+  const n = arr.length;
+  if (n < 2) return new Float64Array(n);
+  const indexed = [];
+  for (let i = 0; i < n; i++) indexed.push({ val: arr[i], idx: i });
+  indexed.sort((a, b) => a.val - b.val);
+
+  const ranks = new Float64Array(n);
+  let i = 0;
+  while (i < n) {
+    let j = i;
+    while (j + 1 < n && indexed[j + 1].val === indexed[i].val) j++;
+    const avg = 0.5 * (i + j);
+    for (let k = i; k <= j; k++) ranks[indexed[k].idx] = avg;
+    i = j + 1;
+  }
+  for (let k = 0; k < n; k++) ranks[k] /= (n - 1);
+  return ranks;
+}
+
+// ──────────────── Client-Side Graph Models ────────────────
+class MemoryStore {
+  constructor(memories) {
+    this.memories = memories;
+    this.n = memories.length;
+    this.total_size_mb = memories.reduce((acc, m) => acc + m.size_mb, 0);
+  }
+  similarity(i, j) {
+    const vi = this.memories[i].vector;
+    const vj = this.memories[j].vector;
+    let dot = 0;
+    for (let k = 0; k < vi.length; k++) dot += vi[k] * vj[k];
+    return dot;
+  }
+}
+
+class MemoryGraph {
+  constructor(n) {
+    this.n = n;
+    this.adj = Array.from({ length: n }, () => new Map());
+    this.alive = new Uint8Array(n).fill(1);
+    this._orig_comp = null;
+  }
+  addEdge(u, v, w = 1.0) {
+    if (u === v) return;
+    this.adj[u].set(v, w);
+    this.adj[v].set(u, w);
+  }
+  neighbours(v) {
+    const res = [];
+    for (const [u] of this.adj[v]) if (this.alive[u]) res.push(u);
+    return res;
+  }
+  degree(v) {
+    let d = 0;
+    for (const [u] of this.adj[v]) if (this.alive[u]) d++;
+    return d;
+  }
+  weightedDegree(v) {
+    let wd = 0;
+    for (const [u, w] of this.adj[v]) if (this.alive[u]) wd += w;
+    return wd;
+  }
+  edgeCount() {
+    let count = 0;
+    for (let i = 0; i < this.n; i++) {
+      if (!this.alive[i]) continue;
+      for (const [j] of this.adj[i]) {
+        if (this.alive[j] && j > i) count++;
+      }
+    }
+    return count;
+  }
+  delete(v) { this.alive[v] = 0; }
+  restore(v) { this.alive[v] = 1; }
+  clone() {
+    const g = new MemoryGraph(this.n);
+    for (let i = 0; i < this.n; i++) {
+      for (const [u, w] of this.adj[i]) g.adj[i].set(u, w);
+    }
+    g.alive.set(this.alive);
+    g._orig_comp = this._orig_comp;
+    return g;
+  }
+  originalComponents() {
+    if (this._orig_comp) return this._orig_comp;
+    const comp = new Int32Array(this.n).fill(-1);
+    let cid = 0;
+    for (let start = 0; start < this.n; start++) {
+      if (comp[start] !== -1) continue;
+      const stack = [start];
+      comp[start] = cid;
+      while (stack.length) {
+        const v = stack.pop();
+        for (const [w] of this.adj[v]) {
+          if (comp[w] === -1) {
+            comp[w] = cid;
+            stack.push(w);
+          }
+        }
+      }
+      cid++;
+    }
+    this._orig_comp = comp;
+    return comp;
+  }
+  connectedComponents() {
+    const comp = new Int32Array(this.n).fill(-1);
+    const sizes = {};
+    let cid = 0;
+    for (let start = 0; start < this.n; start++) {
+      if (!this.alive[start] || comp[start] !== -1) continue;
+      const stack = [start];
+      comp[start] = cid;
+      let count = 0;
+      while (stack.length) {
+        const v = stack.pop();
+        count++;
+        for (const [w] of this.adj[v]) {
+          if (this.alive[w] && comp[w] === -1) {
+            comp[w] = cid;
+            stack.push(w);
+          }
+        }
+      }
+      sizes[cid] = count;
+      cid++;
+    }
+    return { comp, sizes };
+  }
+}
+
+// ──────────────── Iterative Tarjan Structural Index ────────────────
+class StructuralIndex {
+  constructor(graph) {
+    this.g = graph;
+    this.n = graph.n;
+    this.damage = new Float64Array(this.n);
+    this.comp_of = new Int32Array(this.n).fill(-1);
+    this.comp_size = {};
+    this._disc = new Int32Array(this.n);
+    this._low = new Int32Array(this.n);
+    this._sub = new Int32Array(this.n);
+    this._seen = new Int32Array(this.n);
+    this._parent = new Int32Array(this.n).fill(-1);
+    this._gen = 0;
+    this._next_cid = 0;
+  }
+  rebuild() {
+    this.comp_size = {};
+    this._next_cid = 0;
+    this.comp_of.fill(-1);
+    this.damage.fill(0);
+    const roots = [];
+    for (let i = 0; i < this.n; i++) if (this.g.alive[i]) roots.push(i);
+    return this._analyse(roots);
+  }
+  updateAfterDelete(v) {
+    this.damage[v] = 0;
+    this.comp_of[v] = -1;
+    const seeds = this.g.neighbours(v);
+    if (!seeds.length) return [];
+    return this._analyse(seeds);
+  }
+  _analyse(roots) {
+    this._gen++;
+    const gen = this._gen;
+    const visited = [];
+    for (const root of roots) {
+      if (!this.g.alive[root] || this._seen[root] === gen) continue;
+      const { order, pieces } = this._dfs(root, gen);
+      const cid = this._next_cid++;
+      const n_comp = order.length;
+      this.comp_size[cid] = n_comp;
+      const denom = ((n_comp - 1) * (n_comp - 2)) / 2;
+      for (const v of order) {
+        this.comp_of[v] = cid;
+        const ps = pieces[v];
+        if (ps && ps.length) {
+          let kept = 0;
+          let total = 0;
+          for (const c of ps) {
+            kept += (c * (c - 1)) / 2;
+            total += c;
+          }
+          const rest = n_comp - 1 - total;
+          if (rest > 0) kept += (rest * (rest - 1)) / 2;
+          this.damage[v] = Math.max(0, denom - kept);
+        } else {
+          this.damage[v] = 0;
+        }
+      }
+      for (const o of order) visited.push(o);
+    }
+    return visited;
+  }
+  _dfs(root, gen) {
+    const pieces = {};
+    const order = [root];
+    let timer = 0;
+    this._seen[root] = gen;
+    this._disc[root] = this._low[root] = timer++;
+    this._sub[root] = 1;
+    this._parent[root] = -1;
+
+    const rootNeighbours = [];
+    for (const [w] of this.g.adj[root]) if (this.g.alive[w]) rootNeighbours.push(w);
+    const stack = [[root, rootNeighbours, 0]];
+
+    while (stack.length) {
+      const top = stack[stack.length - 1];
+      const v = top[0];
+      const neigh = top[1];
+      let idx = top[2];
+
+      let descended = false;
+      while (idx < neigh.length) {
+        const w = neigh[idx++];
+        top[2] = idx;
+        if (!this.g.alive[w]) continue;
+        if (this._seen[w] !== gen) {
+          this._seen[w] = gen;
+          this._disc[w] = this._low[w] = timer++;
+          this._sub[w] = 1;
+          this._parent[w] = v;
+          order.push(w);
+          const wNeigh = [];
+          for (const [n] of this.g.adj[w]) if (this.g.alive[n]) wNeigh.push(n);
+          stack.push([w, wNeigh, 0]);
+          descended = true;
+          break;
+        }
+        if (w !== this._parent[v] && this._disc[w] < this._low[v]) {
+          this._low[v] = this._disc[w];
+        }
+      }
+      if (descended) continue;
+
+      stack.pop();
+      const p = this._parent[v];
+      if (p !== -1) {
+        this._sub[p] += this._sub[v];
+        if (this._low[v] < this._low[p]) this._low[p] = this._low[v];
+        if (this._low[v] >= this._disc[p]) {
+          if (!pieces[p]) pieces[p] = [];
+          pieces[p].push(this._sub[v]);
+        }
+      }
+    }
+    return { order, pieces };
+  }
+}
+
+// ──────────────── Generator & Builder ────────────────
+function generateStore(n = 150, nCategories = 8, bridgeFraction = 0.05, seed = 42) {
+  const rng = new PRNG(seed);
+  const dim = 16;
+  const centroids = Array.from({ length: nCategories }, () => {
+    const v = Array.from({ length: dim }, () => rng.normal());
+    const mag = Math.sqrt(v.reduce((a, b) => a + b * b, 0)) || 1;
+    return v.map((x) => x / mag);
+  });
+
+  const nBridges = Math.round(n * bridgeFraction);
+  const bridgeIds = new Set();
+  while (bridgeIds.size < nBridges) bridgeIds.add(Math.floor(rng.uniform(0, n)));
+
+  const memories = [];
+  for (let i = 0; i < n; i++) {
+    const cat = Math.floor(rng.uniform(0, nCategories));
+    let base;
+    if (bridgeIds.has(i) && nCategories > 1) {
+      let other = Math.floor(rng.uniform(0, nCategories - 1));
+      if (other >= cat) other++;
+      const mix = rng.uniform(0.35, 0.65);
+      base = centroids[cat].map((val, d) => mix * val + (1 - mix) * centroids[other][d]);
+    } else {
+      base = centroids[cat];
+    }
+    const vec = base.map((val) => val + 0.55 * rng.normal());
+    const mag = Math.sqrt(vec.reduce((a, b) => a + b * b, 0)) || 1;
+    const normVec = vec.map((x) => x / mag);
+
+    const size_mb = Math.max(0.1, Math.min(400.0, rng.lognormal(0.9, 0.9)));
+    const true_imp = rng.beta(2.0, 3.0);
+    const obs_imp = true_imp;
+    const age = rng.uniform(0, 365);
+    const recency = age * rng.beta(1.0, 1.0 + 3.0 * true_imp);
+    const lam = 1.0 + 25.0 * true_imp * Math.exp(-recency / 60.0);
+    const access = rng.poisson(lam);
+
+    memories.push({
+      id: i,
+      name: `${TOPICS[cat % TOPICS.length]} #${i}`,
+      category: cat,
+      size_mb: Math.round(size_mb * 1000) / 1000,
+      true_importance: Math.round(true_imp * 1000) / 1000,
+      observed_importance: Math.round(obs_imp * 1000) / 1000,
+      age_days: Math.round(age * 10) / 10,
+      recency_days: Math.round(recency * 10) / 10,
+      access_count: access,
+      vector: normVec,
+      is_bridge: bridgeIds.has(i),
+    });
+  }
+  return new MemoryStore(memories);
+}
+
+function buildGraph(store, targetDegree = 4.0, seed = 42) {
+  const n = store.n;
+  const g = new MemoryGraph(n);
+  const rng = new PRNG(seed);
+  const k = Math.max(2, Math.round(targetDegree) + 2);
+
+  const buckets = {};
+  for (let i = 0; i < n; i++) {
+    const c = store.memories[i].category;
+    if (!buckets[c]) buckets[c] = [];
+    buckets[c].push(i);
+  }
+
+  const cand = new Map();
+  const bestOf = new Map();
+
+  function offer(i, j, s) {
+    if (i === j || s < 0.15) return;
+    const u = Math.min(i, j);
+    const v = Math.max(i, j);
+    const key = `${u},${v}`;
+    if (s > (cand.get(key) || -1)) cand.set(key, s);
+    if (!bestOf.has(i) || s > bestOf.get(i).s) bestOf.set(i, { s, j });
+    if (!bestOf.has(j) || s > bestOf.get(j).s) bestOf.set(j, { s, i });
+  }
+
+  for (const members of Object.values(buckets)) {
+    for (let a = 0; a < members.length; a++) {
+      const i = members[a];
+      const sims = [];
+      for (let b = 0; b < members.length; b++) {
+        if (a === b) continue;
+        const j = members[b];
+        sims.push({ j, s: store.similarity(i, j) });
+      }
+      sims.sort((x, y) => y.s - x.s);
+      for (let t = 0; t < Math.min(k, sims.length); t++) {
+        offer(i, sims[t].j, sims[t].s);
+      }
+    }
+  }
+
+  const crossSamples = 32;
+  for (let i = 0; i < n; i++) {
+    for (let c = 0; c < crossSamples; c++) {
+      const j = Math.floor(rng.uniform(0, n));
+      offer(i, j, store.similarity(i, j));
+    }
+  }
+
+  const chosen = new Set();
+  for (const [i, { s, j }] of bestOf.entries()) {
+    if (j >= 0) {
+      const u = Math.min(i, j);
+      const v = Math.max(i, j);
+      chosen.add(`${u},${v}`);
+    }
+  }
+
+  const budget = Math.round((n * targetDegree) / 2);
+  if (chosen.size < budget) {
+    const rest = [];
+    for (const [key, s] of cand.entries()) {
+      if (!chosen.has(key)) rest.push({ key, s });
+    }
+    rest.sort((a, b) => b.s - a.s);
+    for (let i = 0; i < Math.min(budget - chosen.size, rest.length); i++) {
+      chosen.add(rest[i].key);
+    }
+  }
+
+  for (const edgeKey of chosen) {
+    const [u, v] = edgeKey.split(",").map(Number);
+    g.addEdge(u, v, cand.get(edgeKey) || 1.0);
+  }
+  return g;
+}
+
+// ──────────────── Scoring & Features ────────────────
+function staticFeatures(store) {
+  const n = store.n;
+  const obsImp = store.memories.map(m => m.observed_importance);
+  const recency = store.memories.map(m => m.recency_days);
+  const access = store.memories.map(m => Math.log1p(m.access_count));
+  const age = store.memories.map(m => m.age_days);
+
+  const impR = rankNormalize(obsImp);
+  const recR = rankNormalize(recency);
+  const accR = rankNormalize(access);
+  const ageR = rankNormalize(age);
+
+  const combined = new Float64Array(n);
+  const b0 = 0.35 / 0.70;
+  const b1 = 0.20 / 0.70;
+  const b2 = 0.15 / 0.70;
+
+  for (let i = 0; i < n; i++) {
+    const usage = 0.5 * (1.0 - recR[i]) + 0.5 * accR[i];
+    const fresh = 1.0 - ageR[i];
+    combined[i] = b0 * impR[i] + b1 * usage + b2 * fresh;
+  }
+  return combined;
+}
+
+function structuralScore(damage, wdeg, damageScale, maxWdeg, cutWeight = 0.7) {
+  const n = damage.length;
+  const score = new Float64Array(n);
+  const scale = Math.max(1.0, damageScale);
+  for (let i = 0; i < n; i++) {
+    const d = Math.sqrt(Math.max(0, Math.min(1.0, damage[i] / scale)));
+    const loc = maxWdeg > 0 ? Math.min(1.0, wdeg[i] / maxWdeg) : 0;
+    score[i] = cutWeight * d + (1.0 - cutWeight) * loc;
+  }
+  return score;
+}
+
+function retentionValue(staticPart, context, wContext) {
+  const n = staticPart.length;
+  const val = new Float64Array(n);
+  for (let i = 0; i < n; i++) {
+    val[i] = (1.0 - wContext) * staticPart[i] + wContext * context[i];
+  }
+  return val;
+}
+
+function evaluate(store, original, g, deleted, runtimeMs = 0) {
+  const n = store.n;
+  const origComp = original.originalComponents();
+  const origGroups = {};
+  for (let i = 0; i < n; i++) {
+    if (g.alive[i]) {
+      const cid = origComp[i];
+      origGroups[cid] = (origGroups[cid] || 0) + 1;
+    }
+  }
+  const { sizes: newSizes } = g.connectedComponents();
+
+  let pairsBefore = 0;
+  for (const c of Object.values(origGroups)) pairsBefore += (c * (c - 1)) / 2;
+  let pairsAfter = 0;
+  for (const c of Object.values(newSizes)) pairsAfter += (c * (c - 1)) / 2;
+
+  const contextRetention = pairsBefore > 0 ? pairsAfter / pairsBefore : 1.0;
+
+  let trueImpBefore = 0;
+  let trueImpAfter = 0;
+  for (let i = 0; i < n; i++) {
+    trueImpBefore += store.memories[i].true_importance;
+    if (g.alive[i]) trueImpAfter += store.memories[i].true_importance;
+  }
+  const importanceRetention = trueImpBefore > 0 ? trueImpAfter / trueImpBefore : 1.0;
+
+  let freedMb = 0;
+  for (const d of deleted) freedMb += store.memories[d].size_mb;
+
+  const bridgesTotal = store.memories.filter(m => m.is_bridge).length;
+  const bridgesSurvived = store.memories.filter(m => m.is_bridge && g.alive[m.id]).length;
+
+  return {
+    context_retention: contextRetention,
+    importance_retention: importanceRetention,
+    freed_mb: freedMb,
+    bridges_survived: bridgesSurvived,
+    bridges_total: bridgesTotal,
+    runtime_ms: Math.round(runtimeMs * 10) / 10,
+    n_deleted: deleted.length,
+  };
+}
+
+// ──────────────── Eviction Policies Evaluator ────────────────
+function runPoliciesClient(store, original, budgetPct = 25.0, selectedPolicies = ALL_POLICIES) {
+  const n = store.n;
+  const requiredMb = store.total_size_mb * (budgetPct / 100.0);
+  const staticPart = staticFeatures(store);
+  const results = [];
+
+  for (const pname of ALL_POLICIES) {
+    if (!selectedPolicies.includes(pname)) continue;
+    const g = original.clone();
+    const t0 = performance.now();
+    let deleted = [];
+    let freed = 0;
+
+    if (pname === "random") {
+      const order = [...Array(n).keys()].sort(() => Math.random() - 0.5);
+      for (const v of order) {
+        if (freed >= requiredMb) break;
+        g.delete(v);
+        deleted.push(v);
+        freed += store.memories[v].size_mb;
+      }
+    } else if (pname === "fifo") {
+      const order = [...Array(n).keys()].sort((a, b) => store.memories[b].age_days - store.memories[a].age_days);
+      for (const v of order) {
+        if (freed >= requiredMb) break;
+        g.delete(v);
+        deleted.push(v);
+        freed += store.memories[v].size_mb;
+      }
+    } else if (pname === "lru") {
+      const order = [...Array(n).keys()].sort((a, b) => store.memories[b].recency_days - store.memories[a].recency_days);
+      for (const v of order) {
+        if (freed >= requiredMb) break;
+        g.delete(v);
+        deleted.push(v);
+        freed += store.memories[v].size_mb;
+      }
+    } else if (pname === "lfu") {
+      const order = [...Array(n).keys()].sort((a, b) => store.memories[a].access_count - store.memories[b].access_count);
+      for (const v of order) {
+        if (freed >= requiredMb) break;
+        g.delete(v);
+        deleted.push(v);
+        freed += store.memories[v].size_mb;
+      }
+    } else if (pname === "size_greedy") {
+      const order = [...Array(n).keys()].sort((a, b) => store.memories[b].size_mb - store.memories[a].size_mb);
+      for (const v of order) {
+        if (freed >= requiredMb) break;
+        g.delete(v);
+        deleted.push(v);
+        freed += store.memories[v].size_mb;
+      }
+    } else if (pname === "value_greedy") {
+      // CAFA with w_C = 0
+      const rho = staticPart.map((v, i) => v / store.memories[i].size_mb);
+      const order = [...Array(n).keys()].sort((a, b) => rho[a] - rho[b]);
+      for (const v of order) {
+        if (freed >= requiredMb) break;
+        g.delete(v);
+        deleted.push(v);
+        freed += store.memories[v].size_mb;
+      }
+    } else if (pname === "degree_cafa") {
+      // Degree CAFA (w_C = 0.30, cut_weight = 0)
+      const wdeg = new Float64Array(n);
+      for (let i = 0; i < n; i++) wdeg[i] = g.weightedDegree(i);
+      const maxWdeg = Math.max(1.0, ...wdeg);
+      const ctx = structuralScore(new Float64Array(n), wdeg, 1.0, maxWdeg, 0.0);
+      const val = retentionValue(staticPart, ctx, 0.30);
+      const rho = val.map((v, i) => v / store.memories[i].size_mb);
+      const order = [...Array(n).keys()].sort((a, b) => rho[a] - rho[b]);
+      for (const v of order) {
+        if (freed >= requiredMb) break;
+        g.delete(v);
+        deleted.push(v);
+        freed += store.memories[v].size_mb;
+      }
+    } else if (pname === "cafa_static") {
+      const si = new StructuralIndex(g);
+      si.rebuild();
+      const wdeg = new Float64Array(n);
+      for (let i = 0; i < n; i++) wdeg[i] = g.weightedDegree(i);
+      const maxWdeg = Math.max(1.0, ...wdeg);
+      const damageScale = Math.max(1.0, ...si.damage);
+      const ctx = structuralScore(si.damage, wdeg, damageScale, maxWdeg, 0.7);
+      const val = retentionValue(staticPart, ctx, 0.30);
+      const rho = val.map((v, i) => v / store.memories[i].size_mb);
+      const order = [...Array(n).keys()].sort((a, b) => rho[a] - rho[b]);
+      for (const v of order) {
+        if (freed >= requiredMb) break;
+        g.delete(v);
+        deleted.push(v);
+        freed += store.memories[v].size_mb;
+      }
+    } else if (pname === "cafa_local" || pname === "cafa_repair") {
+      const bridgeRepair = pname === "cafa_repair";
+      const si = new StructuralIndex(g);
+      si.rebuild();
+      const wdeg = new Float64Array(n);
+      for (let i = 0; i < n; i++) wdeg[i] = g.weightedDegree(i);
+      const maxWdeg = Math.max(1.0, ...wdeg);
+      const damageScale = Math.max(1.0, ...si.damage);
+
+      const ctx = structuralScore(si.damage, wdeg, damageScale, maxWdeg, 0.7);
+      const val = retentionValue(staticPart, ctx, 0.30);
+      const rho = val.map((v, i) => v / store.memories[i].size_mb);
+
+      while (freed < requiredMb) {
+        let bestV = -1, bestRho = Infinity;
+        for (let i = 0; i < n; i++) {
+          if (g.alive[i] && rho[i] < bestRho) {
+            bestRho = rho[i];
+            bestV = i;
+          }
+        }
+        if (bestV < 0) break;
+        const neigh = g.neighbours(bestV);
+        g.delete(bestV);
+        deleted.push(bestV);
+        freed += store.memories[bestV].size_mb;
+
+        if (bridgeRepair && neigh.length > 1) {
+          for (let a = 0; a < neigh.length; a++) {
+            for (let b = a + 1; b < neigh.length; b++) {
+              const u = neigh[a], v = neigh[b];
+              if (!g.adj[u].has(v)) {
+                const s = store.similarity(u, v);
+                if (s >= 0.25) g.addEdge(u, v, s);
+              }
+            }
+          }
+        }
+
+        const changed = si.updateAfterDelete(bestV);
+        if (changed.length) {
+          for (const u of changed) wdeg[u] = g.weightedDegree(u);
+          const newCtx = structuralScore(si.damage, wdeg, damageScale, maxWdeg, 0.7);
+          const newVal = retentionValue(staticPart, newCtx, 0.30);
+          for (const u of changed) {
+            val[u] = newVal[u];
+            rho[u] = newVal[u] / store.memories[u].size_mb;
+          }
+        }
+      }
+    }
+
+    const tEnd = performance.now();
+    const m = evaluate(store, original, g, deleted, tEnd - t0);
+    m.policy = pname;
+    results.push(m);
+  }
+
+  return { results, required_mb: requiredMb };
+}
+
+function graphToJson(graph, store, damage) {
+  const nodes = [];
+  for (let v = 0; v < graph.n; v++) {
+    const node = { id: v, alive: Boolean(graph.alive[v]) };
+    if (store) {
+      const m = store.memories[v];
+      node.name = m.name;
+      node.category = m.category;
+      node.size_mb = m.size_mb;
+      node.true_importance = m.true_importance;
+      node.observed_importance = m.observed_importance;
+      node.age_days = m.age_days;
+      node.recency_days = m.recency_days;
+      node.access_count = m.access_count;
+      node.is_bridge = m.is_bridge;
+    }
+    if (damage) node.damage = Math.round(damage[v] * 100) / 100;
+    nodes.push(node);
+  }
+
+  const edges = [];
+  const seen = new Set();
+  for (let v = 0; v < graph.n; v++) {
+    for (const [w, wt] of graph.adj[v]) {
+      const key = v < w ? `${v},${w}` : `${w},${v}`;
+      if (!seen.has(key)) {
+        seen.add(key);
+        edges.push({
+          source: Math.min(v, w),
+          target: Math.max(v, w),
+          weight: Math.round(wt * 1000) / 1000,
+        });
+      }
+    }
+  }
+  return { nodes, edges };
+}
+
+// ──────────────── Global App State ────────────────
+let clientStore = null;
+let clientGraph = null;
+let clientDamage = null;
+
 let graphData = null;
 let nodePositions = [];
 let hoveredNode = null;
 let selectedNode = null;
 let showLabels = true;
 
-// Pan & Zoom state for main canvas
-let panX = 0;
-let panY = 0;
-let zoom = 1.0;
-let isDragging = false;
-let dragStartX = 0;
-let dragStartY = 0;
+// Pan & Zoom
+let panX = 0, panY = 0, zoom = 1.0;
+let isDragging = false, dragStartX = 0, dragStartY = 0;
 
-// Stepper canvas Pan & Zoom
-let stepperPanX = 0;
-let stepperPanY = 0;
-let stepperZoom = 1.0;
-let isStepperDragging = false;
-let stepperDragStartX = 0;
-let stepperDragStartY = 0;
+let stepperPanX = 0, stepperPanY = 0, stepperZoom = 1.0;
+let isStepperDragging = false, stepperDragStartX = 0, stepperDragStartY = 0;
 
-// Stepper animation state
+// Stepper state
 let autoPlayTimer = null;
-let autoPlaySpeed = 400; // ms
+let autoPlaySpeed = 400;
+let stepperGraph = null;
+let stepperSI = null;
+let stepperStatic = null;
+let stepperVal = null;
+let stepperRho = null;
+let stepperFreed = 0;
+let stepperRequired = 0;
 let stepperGraphData = null;
 let stepperNodePositions = [];
 let justEvictedId = null;
@@ -93,7 +828,6 @@ document.querySelectorAll(".nav-tab").forEach((btn) => {
     const targetPage = document.getElementById("page-" + btn.dataset.tab);
     if (targetPage) targetPage.classList.add("active");
 
-    // Resize canvas if needed
     if (btn.dataset.tab === "playground") {
       resizeCanvas("graph-canvas");
       renderGraph();
@@ -104,7 +838,7 @@ document.querySelectorAll(".nav-tab").forEach((btn) => {
   });
 });
 
-// ──────────────── Sliders & Controls ────────────────
+// Sliders
 function bindSlider(id, valId, fmt) {
   const inp = document.getElementById(id);
   const val = document.getElementById(valId);
@@ -122,14 +856,11 @@ bindSlider("inp-bridges", "val-bridges", (v) => Math.round(v * 100) + "%");
 bindSlider("inp-budget", "val-budget", (v) => v + "%");
 bindSlider("inp-step-budget", "val-step-budget", (v) => v + "%");
 
-const btnRandomSeed = document.getElementById("btn-random-seed");
-if (btnRandomSeed) {
-  btnRandomSeed.addEventListener("click", () => {
-    document.getElementById("inp-seed").value = Math.floor(Math.random() * 10000);
-  });
-}
+document.getElementById("btn-random-seed")?.addEventListener("click", () => {
+  document.getElementById("inp-seed").value = Math.floor(Math.random() * 10000);
+});
 
-// ──────────────── Policy Checkbox Chips ────────────────
+// Policy Checkboxes
 const checkboxContainer = document.getElementById("policy-checkboxes");
 if (checkboxContainer) {
   ALL_POLICIES.forEach((p) => {
@@ -154,7 +885,6 @@ if (checkboxContainer) {
   });
 }
 
-// ──────────────── API Helpers ────────────────
 function showLoading(text) {
   const overlay = document.getElementById("loading-overlay");
   const loadText = document.getElementById("loading-text");
@@ -169,16 +899,7 @@ function hideLoading() {
   setStatus("SYSTEM ONLINE", "online");
 }
 
-async function apiPost(url, body) {
-  const res = await fetch(url, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
-  });
-  return res.json();
-}
-
-// ──────────────── High-DPI Canvas Scaling ────────────────
+// ──────────────── Canvas Scaling & Layout ────────────────
 function resizeCanvas(canvasId) {
   const canvas = document.getElementById(canvasId);
   if (!canvas) return;
@@ -203,7 +924,6 @@ window.addEventListener("resize", () => {
   renderStepperGraph();
 });
 
-// ──────────────── Force Layout Simulation ────────────────
 function layoutGraph(data, width, height) {
   const nodes = data.nodes;
   const edges = data.edges;
@@ -242,7 +962,6 @@ function layoutGraph(data, width, height) {
   for (let it = 0; it < iterations; it++) {
     const temp = 1.0 - it / iterations;
 
-    // Node-node repulsion
     for (let i = 0; i < n; i++) {
       for (let j = i + 1; j < n; j++) {
         const dx = positions[i].x - positions[j].x;
@@ -260,7 +979,6 @@ function layoutGraph(data, width, height) {
       }
     }
 
-    // Edge spring tension
     for (const e of edges) {
       const u = e.source;
       const v = e.target;
@@ -277,7 +995,6 @@ function layoutGraph(data, width, height) {
       positions[v].vy -= fy;
     }
 
-    // Center gravitational pull
     for (let i = 0; i < n; i++) {
       const dx = width / 2 - positions[i].x;
       const dy = height / 2 - positions[i].y;
@@ -294,7 +1011,7 @@ function layoutGraph(data, width, height) {
   return positions.map((p) => ({ x: p.x, y: p.y }));
 }
 
-// ──────────────── Main Graph Rendering ────────────────
+// ──────────────── Canvas Rendering ────────────────
 function renderGraph() {
   const canvas = document.getElementById("graph-canvas");
   if (!canvas || !graphData || !nodePositions.length) return;
@@ -305,25 +1022,21 @@ function renderGraph() {
 
   ctx.clearRect(0, 0, w, h);
 
-  // Apply Pan & Zoom
   ctx.save();
   ctx.translate(panX + w / 2, panY + h / 2);
   ctx.scale(zoom, zoom);
   ctx.translate(-w / 2, -h / 2);
 
-  // Draw Edges
   const nodes = graphData.nodes;
   const edges = graphData.edges;
 
+  // Draw Edges
   for (const e of edges) {
     const u = e.source;
     const v = e.target;
     if (!nodePositions[u] || !nodePositions[v]) continue;
 
-    const uAlive = nodes[u] ? nodes[u].alive : true;
-    const vAlive = nodes[v] ? nodes[v].alive : true;
-    const alive = uAlive && vAlive;
-
+    const alive = (nodes[u]?.alive ?? true) && (nodes[v]?.alive ?? true);
     const isConnectedToHovered =
       hoveredNode !== null && (hoveredNode.id === u || hoveredNode.id === v);
 
@@ -359,10 +1072,8 @@ function renderGraph() {
     const isSelected = selectedNode && selectedNode.id === nd.id;
     const radius = isHovered ? 8.5 : isSelected ? 8 : nd.is_bridge ? 6.5 : 5;
 
-    // Outer Aura for Articulation Points & Bridges
     if (nd.alive) {
       if (nd.damage && nd.damage > 0) {
-        // Articulation point glow
         ctx.beginPath();
         ctx.arc(pos.x, pos.y, radius + 5, 0, Math.PI * 2);
         ctx.fillStyle = "rgba(244, 63, 94, 0.25)";
@@ -371,7 +1082,6 @@ function renderGraph() {
         ctx.lineWidth = 1.2;
         ctx.stroke();
       } else if (nd.is_bridge) {
-        // Bridge node halo
         ctx.beginPath();
         ctx.arc(pos.x, pos.y, radius + 4, 0, Math.PI * 2);
         ctx.fillStyle = "rgba(139, 92, 246, 0.25)";
@@ -382,7 +1092,6 @@ function renderGraph() {
       }
     }
 
-    // Node Body
     ctx.beginPath();
     ctx.arc(pos.x, pos.y, radius, 0, Math.PI * 2);
 
@@ -399,7 +1108,6 @@ function renderGraph() {
     ctx.fill();
     ctx.stroke();
 
-    // Node Labels
     if (showLabels && (isHovered || isSelected || nd.is_bridge || (nd.damage && nd.damage > 0))) {
       ctx.font = "10px 'JetBrains Mono', monospace";
       ctx.fillStyle = isHovered ? "#38bdf8" : "rgba(241, 245, 249, 0.85)";
@@ -457,16 +1165,13 @@ function updateInspector(node) {
   document.getElementById("insp-degree").textContent = deg;
 }
 
-const btnCloseInsp = document.getElementById("btn-close-inspector");
-if (btnCloseInsp) {
-  btnCloseInsp.addEventListener("click", () => {
-    inspector.style.display = "none";
-    selectedNode = null;
-    renderGraph();
-  });
-}
+document.getElementById("btn-close-inspector")?.addEventListener("click", () => {
+  if (inspector) inspector.style.display = "none";
+  selectedNode = null;
+  renderGraph();
+});
 
-// ──────────────── Canvas Mouse Interaction ────────────────
+// Canvas Interactions
 const mainCanvas = document.getElementById("graph-canvas");
 if (mainCanvas) {
   mainCanvas.addEventListener("mousedown", (e) => {
@@ -491,12 +1196,10 @@ if (mainCanvas) {
       return;
     }
 
-    // Hit-testing nodes
     if (!graphData || !nodePositions.length) return;
     const w = rect.width;
     const h = rect.height;
 
-    // Transform screen mouse coords to canvas world coords
     const worldX = (mouseX - (panX + w / 2)) / zoom + w / 2;
     const worldY = (mouseY - (panY + h / 2)) / zoom + h / 2;
 
@@ -532,9 +1235,7 @@ if (mainCanvas) {
   });
 
   mainCanvas.addEventListener("click", () => {
-    if (hoveredNode) {
-      updateInspector(hoveredNode);
-    }
+    if (hoveredNode) updateInspector(hoveredNode);
   });
 
   mainCanvas.addEventListener("wheel", (e) => {
@@ -545,7 +1246,6 @@ if (mainCanvas) {
   });
 }
 
-// Canvas floating zoom buttons
 document.getElementById("btn-zoom-in")?.addEventListener("click", () => {
   zoom = Math.min(5.0, zoom * 1.25);
   renderGraph();
@@ -566,67 +1266,65 @@ document.getElementById("btn-toggle-labels")?.addEventListener("click", (e) => {
   renderGraph();
 });
 
-// ──────────────── API Generate Graph ────────────────
+// ──────────────── Generation Handler (Client Engine) ────────────────
 const btnGenerate = document.getElementById("btn-generate");
 if (btnGenerate) {
-  btnGenerate.addEventListener("click", async () => {
+  btnGenerate.addEventListener("click", () => {
     showLoading("SYNTHESIZING MEMORY TOPOLOGY…");
-    try {
-      const n = parseInt(document.getElementById("inp-n").value, 10);
-      const n_categories = parseInt(document.getElementById("inp-categories").value, 10);
-      const target_degree = parseFloat(document.getElementById("inp-degree").value);
-      const bridge_fraction = parseFloat(document.getElementById("inp-bridges").value);
-      const seed = parseInt(document.getElementById("inp-seed").value, 10);
+    setTimeout(() => {
+      try {
+        const n = parseInt(document.getElementById("inp-n").value, 10);
+        const n_categories = parseInt(document.getElementById("inp-categories").value, 10);
+        const target_degree = parseFloat(document.getElementById("inp-degree").value);
+        const bridge_fraction = parseFloat(document.getElementById("inp-bridges").value);
+        const seed = parseInt(document.getElementById("inp-seed").value, 10);
 
-      const data = await apiPost("/api/generate", {
-        n,
-        n_categories,
-        target_degree,
-        bridge_fraction,
-        seed,
-      });
+        // Run in pure JS
+        clientStore = generateStore(n, n_categories, bridge_fraction, seed);
+        clientGraph = buildGraph(clientStore, target_degree, seed);
 
-      graphData = data.graph;
+        const si = new StructuralIndex(clientGraph);
+        si.rebuild();
+        clientDamage = si.damage;
 
-      // Update Telemetry Grid
-      document.getElementById("stat-n").textContent = data.n;
-      document.getElementById("stat-edges").textContent = data.edge_count;
-      document.getElementById("stat-degree").textContent = data.avg_degree;
-      document.getElementById("stat-size").textContent = `${data.total_size_mb} MB`;
-      document.getElementById("stat-bridges").textContent = data.bridges;
-      document.getElementById("stat-cats").textContent = data.categories;
+        graphData = graphToJson(clientGraph, clientStore, clientDamage);
 
-      const hudCount = document.getElementById("hud-node-count");
-      if (hudCount) hudCount.textContent = `V: ${data.n} | E: ${data.edge_count}`;
+        // Update Telemetry Grid
+        document.getElementById("stat-n").textContent = n;
+        document.getElementById("stat-edges").textContent = clientGraph.edgeCount();
+        document.getElementById("stat-degree").textContent = ((2 * clientGraph.edgeCount()) / n).toFixed(2);
+        document.getElementById("stat-size").textContent = `${clientStore.total_size_mb.toFixed(1)} MB`;
+        document.getElementById("stat-bridges").textContent = clientStore.memories.filter((m) => m.is_bridge).length;
+        document.getElementById("stat-cats").textContent = n_categories;
 
-      // Switch Canvas Viewports
-      document.getElementById("graph-placeholder").style.display = "none";
-      const canvas = document.getElementById("graph-canvas");
-      canvas.style.display = "block";
-      resizeCanvas("graph-canvas");
+        const hudCount = document.getElementById("hud-node-count");
+        if (hudCount) hudCount.textContent = `V: ${n} | E: ${clientGraph.edgeCount()}`;
 
-      // Layout Graph Physics
-      const rect = canvas.getBoundingClientRect();
-      nodePositions = layoutGraph(graphData, rect.width, rect.height);
+        document.getElementById("graph-placeholder").style.display = "none";
+        const canvas = document.getElementById("graph-canvas");
+        canvas.style.display = "block";
+        resizeCanvas("graph-canvas");
 
-      // Reset Pan & Zoom
-      panX = 0;
-      panY = 0;
-      zoom = 1.0;
-      renderGraph();
+        const rect = canvas.getBoundingClientRect();
+        nodePositions = layoutGraph(graphData, rect.width, rect.height);
 
-      // Enable stepper ready state
-      setStatus("GRAPH ONLINE", "online");
-    } catch (err) {
-      console.error(err);
-      setStatus("GENERATION FAILED", "error");
-    } finally {
-      hideLoading();
-    }
+        panX = 0;
+        panY = 0;
+        zoom = 1.0;
+        renderGraph();
+
+        setStatus("GRAPH ONLINE", "online");
+      } catch (err) {
+        console.error(err);
+        setStatus("GENERATION FAILED", "error");
+      } finally {
+        hideLoading();
+      }
+    }, 40);
   });
 }
 
-// ──────────────── Benchmark Execution & Charts ────────────────
+// ──────────────── Bar Charts ────────────────
 function renderBarChart(canvasId, labels, values, colors, highlightIdx, maxVal = 1.0) {
   const canvas = document.getElementById(canvasId);
   if (!canvas) return;
@@ -653,7 +1351,6 @@ function renderBarChart(canvasId, labels, values, colors, highlightIdx, maxVal =
   const barWidth = Math.max(14, Math.min(36, (chartW / n) * 0.65));
   const gap = chartW / n;
 
-  // Background Gridlines
   ctx.strokeStyle = "rgba(255, 255, 255, 0.05)";
   ctx.lineWidth = 1;
   for (let g = 0; g <= 4; g++) {
@@ -670,14 +1367,12 @@ function renderBarChart(canvasId, labels, values, colors, highlightIdx, maxVal =
     ctx.fillText(labelVal, paddingLeft - 8, yVal + 3);
   }
 
-  // Draw Bars
   for (let i = 0; i < n; i++) {
     const x = paddingLeft + i * gap + (gap - barWidth) / 2;
     const barH = (Math.max(0, values[i]) / maxVal) * chartH;
     const y = paddingTop + chartH - barH;
     const isTop = i === highlightIdx;
 
-    // Glowing Neon Gradient
     const grad = ctx.createLinearGradient(x, y, x, y + barH);
     const baseColor = colors[i] || "#6366f1";
     grad.addColorStop(0, isTop ? "#06b6d4" : baseColor);
@@ -691,7 +1386,6 @@ function renderBarChart(canvasId, labels, values, colors, highlightIdx, maxVal =
       ctx.shadowBlur = 0;
     }
 
-    // Rounded Top Bar
     ctx.beginPath();
     const rad = 4;
     ctx.moveTo(x, y + barH);
@@ -704,141 +1398,134 @@ function renderBarChart(canvasId, labels, values, colors, highlightIdx, maxVal =
     ctx.fill();
     ctx.shadowBlur = 0;
 
-    // Value Label on Top
     ctx.fillStyle = isTop ? "#38bdf8" : "rgba(241, 245, 249, 0.9)";
     ctx.font = "10px 'JetBrains Mono', monospace";
     ctx.textAlign = "center";
     ctx.fillText(values[i].toFixed(3), x + barWidth / 2, y - 6);
 
-    // X Axis Label
     ctx.fillStyle = isTop ? "#fff" : "rgba(148, 163, 184, 0.7)";
     ctx.font = "9px 'Plus Jakarta Sans', sans-serif";
     ctx.fillText(labels[i], x + barWidth / 2, paddingTop + chartH + 18);
   }
 }
 
+// ──────────────── Benchmark Handler (Client Engine) ────────────────
 const btnRunCompare = document.getElementById("btn-run-compare");
 if (btnRunCompare) {
-  btnRunCompare.addEventListener("click", async () => {
-    if (!graphData) {
-      alert("Generate a graph in the Graph Cockpit first!");
+  btnRunCompare.addEventListener("click", () => {
+    if (!clientStore || !clientGraph) {
+      alert("Generate a memory graph in the Graph Cockpit first!");
       return;
     }
 
     showLoading("EXECUTING EVICTION POLICIES BENCHMARK…");
-    try {
-      const budget_pct = parseFloat(document.getElementById("inp-budget").value);
-      const selected = Array.from(
-        document.querySelectorAll("#policy-checkboxes input:checked")
-      ).map((cb) => cb.value);
+    setTimeout(() => {
+      try {
+        const budget_pct = parseFloat(document.getElementById("inp-budget").value);
+        const selected = Array.from(
+          document.querySelectorAll("#policy-checkboxes input:checked")
+        ).map((cb) => cb.value);
 
-      const res = await apiPost("/api/run", {
-        budget_pct,
-        policies: selected,
-      });
+        const { results } = runPoliciesClient(clientStore, clientGraph, budget_pct, selected);
+        if (!results || !results.length) return;
 
-      const results = res.results;
-      if (!results || !results.length) return;
+        document.getElementById("compare-placeholder").style.display = "none";
+        document.getElementById("compare-results").style.display = "flex";
 
-      document.getElementById("compare-placeholder").style.display = "none";
-      document.getElementById("compare-results").style.display = "flex";
+        let topIdx = 0;
+        let topRetention = -1;
+        let lruRetention = 0;
 
-      // Find top policy by context retention
-      let topIdx = 0;
-      let topRetention = -1;
-      let lruRetention = 0;
+        results.forEach((r, idx) => {
+          const ret = r.context_retention ?? 0;
+          if (ret > topRetention) {
+            topRetention = ret;
+            topIdx = idx;
+          }
+          if (r.policy === "lru") lruRetention = ret;
+        });
 
-      results.forEach((r, idx) => {
-        const ret = r.context_retention ?? 0;
-        if (ret > topRetention) {
-          topRetention = ret;
-          topIdx = idx;
-        }
-        if (r.policy === "lru") lruRetention = ret;
-      });
+        const topPolicy = results[topIdx];
+        document.getElementById("kpi-top-policy").textContent =
+          POLICY_LABELS[topPolicy.policy] || topPolicy.policy;
+        document.getElementById("kpi-top-desc").textContent = `${(
+          topRetention * 100
+        ).toFixed(1)}% pairwise context preservation`;
 
-      const topPolicy = results[topIdx];
-      document.getElementById("kpi-top-policy").textContent =
-        POLICY_LABELS[topPolicy.policy] || topPolicy.policy;
-      document.getElementById("kpi-top-desc").textContent = `${(
-        topRetention * 100
-      ).toFixed(1)}% pairwise context preservation`;
+        const diff = lruRetention > 0 ? ((topRetention - lruRetention) / lruRetention) * 100 : 0;
+        document.getElementById("kpi-gain").textContent = `+${diff.toFixed(1)}%`;
 
-      const diff = lruRetention > 0 ? ((topRetention - lruRetention) / lruRetention) * 100 : 0;
-      document.getElementById("kpi-gain").textContent = `+${diff.toFixed(1)}%`;
+        const bridgeSurv =
+          topPolicy.bridges_survived !== undefined
+            ? `${topPolicy.bridges_survived}/${topPolicy.bridges_total || topPolicy.bridges_survived}`
+            : "100%";
+        document.getElementById("kpi-bridges-saved").textContent = bridgeSurv;
 
-      const bridgeSurv =
-        topPolicy.bridges_survived !== undefined
-          ? `${topPolicy.bridges_survived}/${topPolicy.bridges_total || topPolicy.bridges_survived}`
-          : "100%";
-      document.getElementById("kpi-bridges-saved").textContent = bridgeSurv;
+        const labels = results.map((r) => POLICY_LABELS[r.policy] || r.policy);
+        const retentions = results.map((r) => r.context_retention ?? 0);
+        const importances = results.map((r) => r.importance_retention ?? 0);
+        const colors = results.map((r) => POLICY_COLORS[r.policy] || "#6366f1");
 
-      // Populate Charts
-      const labels = results.map((r) => POLICY_LABELS[r.policy] || r.policy);
-      const retentions = results.map((r) => r.context_retention ?? 0);
-      const importances = results.map((r) => r.importance_retention ?? 0);
-      const colors = results.map((r) => POLICY_COLORS[r.policy] || "#6366f1");
+        renderBarChart("chart-retention", labels, retentions, colors, topIdx, 1.0);
+        renderBarChart("chart-importance", labels, importances, colors, topIdx, 1.0);
 
-      renderBarChart("chart-retention", labels, retentions, colors, topIdx, 1.0);
-      renderBarChart("chart-importance", labels, importances, colors, topIdx, 1.0);
-
-      // Populate Matrix Table
-      const thead = document.getElementById("results-thead");
-      const tbody = document.getElementById("results-tbody");
-      thead.innerHTML = `
-        <th>POLICY</th>
-        <th>CONTEXT RETENTION</th>
-        <th>IMPORTANCE RETENTION</th>
-        <th>FREED (MB)</th>
-        <th>BRIDGES SAVED</th>
-        <th>RUNTIME (MS)</th>
-      `;
-      tbody.innerHTML = "";
-
-      results.forEach((r, idx) => {
-        const tr = document.createElement("tr");
-        const isWinner = idx === topIdx;
-        const color = POLICY_COLORS[r.policy] || "#64748b";
-        const cRet = r.context_retention ?? 0;
-        const delta = lruRetention > 0 ? cRet - lruRetention : 0;
-        const deltaBadge =
-          delta !== 0
-            ? `<span class="diff-badge ${delta > 0 ? "pos" : "neg"}">${
-                delta > 0 ? "+" : ""
-              }${(delta * 100).toFixed(1)}%</span>`
-            : "";
-
-        tr.innerHTML = `
-          <td>
-            <div class="policy-cell">
-              <span class="policy-color-dot" style="background:${color}"></span>
-              <span>${POLICY_LABELS[r.policy] || r.policy}</span>
-              ${isWinner ? '<span class="diff-badge pos">TOP</span>' : ""}
-            </div>
-          </td>
-          <td>
-            <span class="metric-pill ${isWinner ? "top" : ""}">${cRet.toFixed(3)}</span>
-            ${deltaBadge}
-          </td>
-          <td><span class="mono">${(r.importance_retention ?? 0).toFixed(3)}</span></td>
-          <td><span class="mono">${(r.freed_mb ?? 0).toFixed(1)} MB</span></td>
-          <td><span class="mono">${r.bridges_survived ?? "—"}</span></td>
-          <td><span class="mono">${r.runtime_ms ?? 0} ms</span></td>
+        const thead = document.getElementById("results-thead");
+        const tbody = document.getElementById("results-tbody");
+        thead.innerHTML = `
+          <th>POLICY</th>
+          <th>CONTEXT RETENTION</th>
+          <th>IMPORTANCE RETENTION</th>
+          <th>FREED (MB)</th>
+          <th>BRIDGES SAVED</th>
+          <th>RUNTIME (MS)</th>
         `;
-        tbody.appendChild(tr);
-      });
+        tbody.innerHTML = "";
 
-      setStatus("BENCHMARK COMPLETE", "online");
-    } catch (err) {
-      console.error(err);
-      setStatus("BENCHMARK ERROR", "error");
-    } finally {
-      hideLoading();
-    }
+        results.forEach((r, idx) => {
+          const tr = document.createElement("tr");
+          const isWinner = idx === topIdx;
+          const color = POLICY_COLORS[r.policy] || "#64748b";
+          const cRet = r.context_retention ?? 0;
+          const delta = lruRetention > 0 ? cRet - lruRetention : 0;
+          const deltaBadge =
+            delta !== 0
+              ? `<span class="diff-badge ${delta > 0 ? "pos" : "neg"}">${
+                  delta > 0 ? "+" : ""
+                }${(delta * 100).toFixed(1)}%</span>`
+              : "";
+
+          tr.innerHTML = `
+            <td>
+              <div class="policy-cell">
+                <span class="policy-color-dot" style="background:${color}"></span>
+                <span>${POLICY_LABELS[r.policy] || r.policy}</span>
+                ${isWinner ? '<span class="diff-badge pos">TOP</span>' : ""}
+              </div>
+            </td>
+            <td>
+              <span class="metric-pill ${isWinner ? "top" : ""}">${cRet.toFixed(3)}</span>
+              ${deltaBadge}
+            </td>
+            <td><span class="mono">${(r.importance_retention ?? 0).toFixed(3)}</span></td>
+            <td><span class="mono">${(r.freed_mb ?? 0).toFixed(1)} MB</span></td>
+            <td><span class="mono">${r.bridges_survived ?? "—"}</span></td>
+            <td><span class="mono">${r.runtime_ms ?? 0} ms</span></td>
+          `;
+          tbody.appendChild(tr);
+        });
+
+        setStatus("BENCHMARK COMPLETE", "online");
+      } catch (err) {
+        console.error(err);
+        setStatus("BENCHMARK ERROR", "error");
+      } finally {
+        hideLoading();
+      }
+    }, 40);
   });
 }
 
-// ──────────────── Stepper Eviction Simulation ────────────────
+// ──────────────── Stepper View (Client Engine) ────────────────
 function renderStepperGraph() {
   const canvas = document.getElementById("stepper-canvas");
   if (!canvas || !stepperGraphData || !stepperNodePositions.length) return;
@@ -857,7 +1544,6 @@ function renderStepperGraph() {
   const nodes = stepperGraphData.nodes;
   const edges = stepperGraphData.edges;
 
-  // Draw Edges
   for (const e of edges) {
     const u = e.source;
     const v = e.target;
@@ -878,7 +1564,6 @@ function renderStepperGraph() {
     ctx.stroke();
   }
 
-  // Draw Nodes
   for (let i = 0; i < nodes.length; i++) {
     const nd = nodes[i];
     const pos = stepperNodePositions[i];
@@ -887,7 +1572,6 @@ function renderStepperGraph() {
     const isJustEvicted = justEvictedId === nd.id;
     const radius = isJustEvicted ? 9 : nd.is_bridge ? 6.5 : 5;
 
-    // Shockwave pulse for just evicted
     if (isJustEvicted) {
       ctx.beginPath();
       ctx.arc(pos.x, pos.y, radius + 10, 0, Math.PI * 2);
@@ -898,7 +1582,6 @@ function renderStepperGraph() {
       ctx.stroke();
     }
 
-    // Halo
     if (nd.alive) {
       if (nd.damage && nd.damage > 0) {
         ctx.beginPath();
@@ -940,7 +1623,6 @@ function renderStepperGraph() {
   ctx.restore();
 }
 
-// Stepper controls
 const btnStepInit = document.getElementById("btn-step-init");
 const btnStepNext = document.getElementById("btn-step-next");
 const btnStepAuto = document.getElementById("btn-step-auto");
@@ -963,92 +1645,147 @@ function logStep(text, type = "normal") {
 }
 
 if (btnStepInit) {
-  btnStepInit.addEventListener("click", async () => {
-    if (!graphData) {
+  btnStepInit.addEventListener("click", () => {
+    if (!clientStore || !clientGraph) {
       alert("Generate a memory graph in the Graph Cockpit first!");
       return;
     }
 
-    showLoading("INITIALIZING CAFA STEPPER…");
-    try {
-      if (autoPlayTimer) {
-        clearInterval(autoPlayTimer);
-        autoPlayTimer = null;
-        btnStepAuto.querySelector(".t-txt").textContent = "AUTO";
-      }
-
-      const budget_pct = parseFloat(document.getElementById("inp-step-budget").value);
-      const res = await apiPost("/api/step", { action: "init", budget_pct });
-
-      stepperGraphData = res.graph;
-      document.getElementById("stepper-placeholder").style.display = "none";
-      const canvas = document.getElementById("stepper-canvas");
-      canvas.style.display = "block";
-      resizeCanvas("stepper-canvas");
-
-      const rect = canvas.getBoundingClientRect();
-      stepperNodePositions = layoutGraph(stepperGraphData, rect.width, rect.height);
-      stepperPanX = 0;
-      stepperPanY = 0;
-      stepperZoom = 1.0;
-      justEvictedId = null;
-      renderStepperGraph();
-
-      btnStepNext.disabled = false;
-      btnStepAuto.disabled = false;
-      stepperBadge.textContent = "INITIALIZED";
-      gaugePct.textContent = "0.0%";
-      stepBar.style.width = "0%";
-      stepText.textContent = `0.00 / ${res.required_mb} MB`;
-
-      stepLog.innerHTML = "";
-      stepEventCount = 0;
-      logStep(`[INIT] Target: Free ${res.required_mb} MB (${budget_pct}%)`, "system");
-      setStatus("STEPPER READY", "online");
-    } catch (err) {
-      console.error(err);
-    } finally {
-      hideLoading();
+    if (autoPlayTimer) {
+      clearInterval(autoPlayTimer);
+      autoPlayTimer = null;
+      btnStepAuto.querySelector(".t-txt").textContent = "AUTO";
     }
+
+    const budget_pct = parseFloat(document.getElementById("inp-step-budget").value);
+    stepperRequired = clientStore.total_size_mb * (budget_pct / 100.0);
+    stepperFreed = 0;
+    stepperGraph = clientGraph.clone();
+
+    stepperSI = new StructuralIndex(stepperGraph);
+    stepperSI.rebuild();
+
+    const n = clientStore.n;
+    stepperStatic = staticFeatures(clientStore);
+
+    const wdeg = new Float64Array(n);
+    for (let i = 0; i < n; i++) wdeg[i] = stepperGraph.weightedDegree(i);
+    const maxWdeg = Math.max(1.0, ...wdeg);
+    const damageScale = Math.max(1.0, ...stepperSI.damage);
+
+    const ctx = structuralScore(stepperSI.damage, wdeg, damageScale, maxWdeg, 0.7);
+    stepperVal = retentionValue(stepperStatic, ctx, 0.30);
+    stepperRho = stepperVal.map((v, i) => v / clientStore.memories[i].size_mb);
+
+    stepperGraphData = graphToJson(stepperGraph, clientStore, stepperSI.damage);
+
+    document.getElementById("stepper-placeholder").style.display = "none";
+    const canvas = document.getElementById("stepper-canvas");
+    canvas.style.display = "block";
+    resizeCanvas("stepper-canvas");
+
+    const rect = canvas.getBoundingClientRect();
+    stepperNodePositions = layoutGraph(stepperGraphData, rect.width, rect.height);
+    stepperPanX = 0;
+    stepperPanY = 0;
+    stepperZoom = 1.0;
+    justEvictedId = null;
+    renderStepperGraph();
+
+    btnStepNext.disabled = false;
+    btnStepAuto.disabled = false;
+    stepperBadge.textContent = "INITIALIZED";
+    gaugePct.textContent = "0.0%";
+    stepBar.style.width = "0%";
+    stepText.textContent = `0.00 / ${stepperRequired.toFixed(2)} MB`;
+
+    stepLog.innerHTML = "";
+    stepEventCount = 0;
+    logStep(`[INIT] Target: Free ${stepperRequired.toFixed(2)} MB (${budget_pct}%)`, "system");
+    setStatus("STEPPER READY", "online");
   });
 }
 
-async function doStepNext() {
-  try {
-    const res = await apiPost("/api/step", { action: "next" });
-
-    if (res.status === "complete") {
-      logStep(`[COMPLETE] Freed ${res.freed} MB (${res.n_deleted} evicted)`, "complete");
-      stepperBadge.textContent = "COMPLETE";
-      btnStepNext.disabled = true;
-      if (autoPlayTimer) {
-        clearInterval(autoPlayTimer);
-        autoPlayTimer = null;
-        btnStepAuto.querySelector(".t-txt").textContent = "AUTO";
-      }
-      return false;
+function doStepNext() {
+  if (!stepperGraph || stepperFreed >= stepperRequired) {
+    logStep(`[COMPLETE] Freed ${stepperFreed.toFixed(2)} MB`, "complete");
+    stepperBadge.textContent = "COMPLETE";
+    btnStepNext.disabled = true;
+    if (autoPlayTimer) {
+      clearInterval(autoPlayTimer);
+      autoPlayTimer = null;
+      btnStepAuto.querySelector(".t-txt").textContent = "AUTO";
     }
-
-    stepperGraphData = res.graph;
-    justEvictedId = res.evicted.id;
-    renderStepperGraph();
-
-    const pct = Math.min(100, res.pct_done);
-    gaugePct.textContent = `${pct.toFixed(1)}%`;
-    stepBar.style.width = `${pct}%`;
-    stepText.textContent = `${res.freed} / ${res.required_mb} MB`;
-
-    const ev = res.evicted;
-    let msg = `[EVICT #${ev.id}] ${ev.size_mb} MB | ρ=${ev.rho.toFixed(4)}`;
-    if (ev.is_bridge) msg += " | [CRITICAL BRIDGE]";
-    if (ev.was_articulation) msg += " | [CUT VERTEX]";
-    logStep(msg, ev.is_bridge ? "bridge-alert" : "evict");
-
-    return true;
-  } catch (err) {
-    console.error(err);
     return false;
   }
+
+  const n = clientStore.n;
+  let bestV = -1, bestRho = Infinity;
+  for (let i = 0; i < n; i++) {
+    if (stepperGraph.alive[i] && stepperRho[i] < bestRho) {
+      bestRho = stepperRho[i];
+      bestV = i;
+    }
+  }
+
+  if (bestV < 0) {
+    stepperBadge.textContent = "COMPLETE";
+    btnStepNext.disabled = true;
+    return false;
+  }
+
+  const neigh = stepperGraph.neighbours(bestV);
+  const wasCut = stepperSI.damage[bestV] > 0;
+  const isBridge = clientStore.memories[bestV].is_bridge;
+
+  stepperGraph.delete(bestV);
+  justEvictedId = bestV;
+  stepperFreed += clientStore.memories[bestV].size_mb;
+
+  // Bridge repair
+  if (neigh.length > 1) {
+    for (let a = 0; a < neigh.length; a++) {
+      for (let b = a + 1; b < neigh.length; b++) {
+        const u = neigh[a], v = neigh[b];
+        if (!stepperGraph.adj[u].has(v)) {
+          const s = clientStore.similarity(u, v);
+          if (s >= 0.25) stepperGraph.addEdge(u, v, s);
+        }
+      }
+    }
+  }
+
+  // Local Tarjan recompute
+  const changed = stepperSI.updateAfterDelete(bestV);
+  const wdeg = new Float64Array(n);
+  for (let i = 0; i < n; i++) if (stepperGraph.alive[i]) wdeg[i] = stepperGraph.weightedDegree(i);
+  const maxWdeg = Math.max(1.0, ...wdeg);
+  const damageScale = Math.max(1.0, ...stepperSI.damage);
+
+  if (changed.length) {
+    const newCtx = structuralScore(stepperSI.damage, wdeg, damageScale, maxWdeg, 0.7);
+    const newVal = retentionValue(stepperStatic, newCtx, 0.30);
+    for (const u of changed) {
+      stepperVal[u] = newVal[u];
+      stepperRho[u] = newVal[u] / clientStore.memories[u].size_mb;
+    }
+  }
+
+  stepperGraphData = graphToJson(stepperGraph, clientStore, stepperSI.damage);
+  renderStepperGraph();
+
+  const pct = Math.min(100, (stepperFreed / stepperRequired) * 100);
+  gaugePct.textContent = `${pct.toFixed(1)}%`;
+  stepBar.style.width = `${pct}%`;
+  stepText.textContent = `${stepperFreed.toFixed(2)} / ${stepperRequired.toFixed(2)} MB`;
+
+  const m = clientStore.memories[bestV];
+  let msg = `[EVICT #${bestV}] ${m.size_mb} MB | ρ=${bestRho.toFixed(4)}`;
+  if (isBridge) msg += " | [CRITICAL BRIDGE]";
+  if (wasCut) msg += " | [CUT VERTEX]";
+  logStep(msg, isBridge ? "bridge-alert" : "evict");
+
+  return true;
 }
 
 if (btnStepNext) {
@@ -1065,8 +1802,8 @@ if (btnStepAuto) {
     } else {
       btnStepAuto.querySelector(".t-txt").textContent = "PAUSE";
       btnStepAuto.classList.add("active");
-      autoPlayTimer = setInterval(async () => {
-        const ok = await doStepNext();
+      autoPlayTimer = setInterval(() => {
+        const ok = doStepNext();
         if (!ok && autoPlayTimer) {
           clearInterval(autoPlayTimer);
           autoPlayTimer = null;
@@ -1078,7 +1815,6 @@ if (btnStepAuto) {
   });
 }
 
-// Speed toggles
 document.querySelectorAll(".speed-pill").forEach((pill) => {
   pill.addEventListener("click", () => {
     document.querySelectorAll(".speed-pill").forEach((p) => p.classList.remove("active"));
@@ -1086,8 +1822,8 @@ document.querySelectorAll(".speed-pill").forEach((pill) => {
     autoPlaySpeed = parseInt(pill.dataset.speed, 10);
     if (autoPlayTimer) {
       clearInterval(autoPlayTimer);
-      autoPlayTimer = setInterval(async () => {
-        const ok = await doStepNext();
+      autoPlayTimer = setInterval(() => {
+        const ok = doStepNext();
         if (!ok && autoPlayTimer) {
           clearInterval(autoPlayTimer);
           autoPlayTimer = null;
@@ -1098,7 +1834,6 @@ document.querySelectorAll(".speed-pill").forEach((pill) => {
   });
 });
 
-// Stepper Canvas Pan & Zoom
 const stepperCanvas = document.getElementById("stepper-canvas");
 if (stepperCanvas) {
   stepperCanvas.addEventListener("mousedown", (e) => {
