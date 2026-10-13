@@ -1,0 +1,36 @@
+# Build directories
+build/
+bin/
+*.exe
+*.o
+*.obj
+*.lib
+*.a
+*.pdb
+*.ilk
+*.idb
+
+# CMake & IDE files
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+*.vcxproj
+*.vcxproj.*
+*.sln
+*.dir/
+.vs/
+.vscode/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+*.egg-info/
+dist/
+.venv/
+venv/
+
+# OS files
+.DS_Store
+Thumbs.db
